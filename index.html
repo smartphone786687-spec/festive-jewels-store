@@ -437,7 +437,7 @@ body.on-product{padding-bottom:140px}
     <div id="authMsg"></div>
     <div id="authDiag" class="small" style="margin-top:10px;line-height:1.55"></div>
     <p class="small" style="margin-top:14px">Store owner? Use the separate <b>Admin</b> button in the header — owner login is different from customer sign-in.</p>
-    <p class="small" style="margin-top:6px">If sign-in does not open, allow popups for this site and try again — if a popup is blocked, this page will automatically take you to Google sign-in in the full page.</p>
+    <p class="small" style="margin-top:6px">You will be taken to Google sign-in in the full page — complete sign-in there and you will return here automatically.</p>
   </div>
   </div>
 </div></div>
@@ -512,67 +512,55 @@ function mergedOrdersForUser(){var u=currentUser();if(!u)return[];var map={};ord
 function mergedAdminOrders(){var map={};orders.forEach(function(o){map[o.id]=o});cloudOrders.forEach(function(o){map[o.id]=Object.assign({},map[o.id]||{},o,{cloud:true})});return Object.values(map).sort(function(a,b){return new Date(b.date)-new Date(a.date)})}
 function syncPendingOrders(){if(!fbDb||!fbUser)return;var pending=orders.filter(function(o){return o.syncStatus==='pending'&&o.userId===fbUser.uid});pending.forEach(function(o){writeOrderToCloud(o).then(function(ok){if(ok){o.syncStatus='synced';save(LS.o,orders)}})})}
 function writeOrderToCloud(o){if(!fbDb||!fbUser)return Promise.resolve(false);var items=(o.items||[]).map(function(i){var prod=products.filter(function(x){return x.name===i.name})[0];return{productId:i.productId||(prod?prod.id:''),name:i.name,price:i.price||0,qty:i.qty||1,cost:i.cost||0}});var costTotal=items.reduce(function(a,i){return a+(i.cost||0)*(i.qty||1)},0);var data={id:o.id,userId:fbUser.uid,userEmail:fbUser.email||'',userName:fbUser.displayName||o.customer||'',customerName:o.customer||'',phone:o.phone||'',address:o.address||'',city:o.city||'',state:o.state||'',pincode:o.pincode||'',items:items,itemsText:o.itemsText||'',total:o.total||0,costTotal:costTotal,margin:(o.total||0)-costTotal,paymentMethod:o.payment||'COD',paymentStatus:o.payment==='COD'?'Pending on delivery':'Pending confirmation',status:o.status||'New',createdAt:firebase.firestore.FieldValue.serverTimestamp(),source:'website'};return fbDb.collection('orders').doc(o.id).set(data,{merge:true}).then(function(){return true}).catch(function(e){console.warn('Order cloud write:',e);return false})}
-var signInInProgress=false,signInWatchdog=null,pendingRedirectError=null;
+var signInInProgress=false,pendingRedirectError=null,redirectResultSettled=false,redirectAuthChecked=false;
 var AUTH_DIAG_KEY='fjgh_authdiag';
+var REDIRECT_FLAG_KEY='fj_auth_redirect_pending';
+function setRedirectPending(){try{sessionStorage.setItem(REDIRECT_FLAG_KEY,JSON.stringify({at:Date.now()}))}catch(e){try{sessionStorage.setItem(REDIRECT_FLAG_KEY,String(Date.now()))}catch(e2){}}}
+function getRedirectPending(){try{var v=sessionStorage.getItem(REDIRECT_FLAG_KEY);if(!v)return null;try{var o=JSON.parse(v);if(o&&o.at)return o}catch(e){}var n=parseInt(v,10);if(!isNaN(n))return{at:n};return{at:Date.now()}}catch(e){return null}}
+function clearRedirectPending(){try{sessionStorage.removeItem(REDIRECT_FLAG_KEY)}catch(e){}}
+function isRedirectPendingStale(p){if(!p||!p.at)return true;return(Date.now()-Number(p.at))>10*60*1000}
 function getLastAuthDiag(){try{var v=localStorage.getItem(AUTH_DIAG_KEY);return v?JSON.parse(v):null}catch(e){return null}}
 function logAuthDiag(code,message,context){var entry={code:code||'unknown',message:message||'',context:context||'',at:new Date().toISOString()};try{localStorage.setItem(AUTH_DIAG_KEY,JSON.stringify(entry))}catch(e){}renderAuthDiag();return entry}
 function friendlyAuthError(code,message){
- if(code==='auth/popup-blocked')return 'Popup was blocked by your browser. Please allow popups for this site — or wait, we are taking you to Google sign-in in the full page. ('+code+')';
- if(code==='auth/popup-closed-by-user')return 'The Google sign-in window was closed before finishing. Please tap “Continue with Google” again and complete the sign-in in the window that opens. ('+code+')';
- if(code==='auth/cancelled-popup-request')return 'Another sign-in window was already open, so this attempt was cancelled. We are taking you to Google sign-in in the full page instead. ('+code+')';
- if(code==='auth/popup-timeout')return 'The Google sign-in popup did not respond — it may have been blocked. We are taking you to Google sign-in in the full page instead. ('+code+')';
+ if(code==='auth/redirect-no-user')return 'Sign-in did not complete - please try again. ('+code+')';
  if(code==='auth/network-request-failed')return 'Network problem — sign-in could not reach Google. Check your internet connection and try again. ('+code+')';
  if(code==='auth/unauthorized-domain')return 'This website address is not authorised for Google sign-in. The store owner needs to add this domain in Firebase → Authentication → Authorised domains. ('+code+')';
  if(code==='auth/operation-not-allowed')return 'Google sign-in is not enabled for this store yet. Please contact us on WhatsApp for help. ('+code+')';
- if(code==='auth/operation-not-supported-in-this-environment')return 'Popups are not supported in this browser view. We are taking you to Google sign-in in the full page instead. ('+code+')';
  if(code==='auth/internal-error')return 'Google sign-in hit an internal error. Please try again in a moment. ('+code+')';
+ if(code==='auth/user-cancelled')return 'Sign-in did not complete - please try again. ('+code+')';
  return (message||'Sign-in failed. Please try again.')+(code?' ('+code+')':'')}
 function setAuthStatus(msg,isError){var el=document.getElementById('authStatus');if(el){el.innerHTML=msg?'<div class="notice" style="'+(isError?'border-color:var(--danger);':'')+'margin:8px 0">'+esc(msg)+'</div>':''}var gm=document.getElementById('googleMsg');if(gm&&msg)gm.innerHTML=''}
 function renderAuthDiag(){var d=getLastAuthDiag();var html='';if(d){html='<b>Sign-in diagnostics:</b> Last error — <code>'+esc(d.code)+'</code> · '+esc(d.message||'')+'<br/><span style="opacity:.85">'+esc(d.at)+(d.context?' · '+esc(d.context):'')+'</span><br/>If sign-in keeps failing, share this code with support on WhatsApp.'}else{html='<b>Sign-in diagnostics:</b> No sign-in errors recorded on this device yet. If a sign-in fails, the reason (error code + time) will appear here for support.'}
  var el=document.getElementById('authDiag');if(el)el.innerHTML=html;var adm=document.getElementById('adminAuthDiag');if(adm)adm.innerHTML=html}
-function setGoogleBtnLoading(loading){var b=document.getElementById('fbGoogleBtn');if(!b)return;b.disabled=!!loading;var s=b.querySelector('span');if(s)s.textContent=loading?'Opening Google sign-in…':'Continue with Google';b.style.opacity=loading?'0.72':'';b.setAttribute('aria-busy',loading?'true':'false')}
-function doRedirectFallback(provider,reasonMsg,sourceTag){setAuthStatus(reasonMsg||'Popup was blocked — taking you to Google sign-in…');return fbAuth.signInWithRedirect(provider).catch(function(e2){signInInProgress=false;setGoogleBtnLoading(false);var c2=e2&&e2.code||'auth/redirect-failed';var f2=friendlyAuthError(c2,e2&&e2.message);logAuthDiag(c2,e2&&e2.message||f2,sourceTag||'signInWithRedirect');setAuthStatus(f2,true)})}
-function initFirebase(){try{if(!window.firebase){fbInitError='Firebase library could not load (network). Sign-in is unavailable offline — please reconnect and refresh.';fbReady=true;renderAuthArea();return}if(!firebase.apps.length)firebase.initializeApp(firebaseConfig);fbAuth=firebase.auth();fbDb=firebase.firestore();fbAuth.getRedirectResult().then(function(res){if(res&&res.user){pendingRedirectError=null;toast('Signed in with Google — welcome!')}}).catch(function(e){console.warn('Redirect result:',e);if(!e)return;var code=e.code||'auth/redirect-error';var friendly=friendlyAuthError(code,e.message);pendingRedirectError={code:code,message:e.message||friendly,at:new Date().toISOString()};logAuthDiag(code,e.message||friendly,'getRedirectResult');try{openAuth();setAuthStatus('Google sign-in did not complete after returning to this page. '+friendly,true);renderAuthDiag()}catch(err2){}});
- fbAuth.onAuthStateChanged(function(user){fbUser=user||null;fbReady=true;fbProfile=null;cloudOrders=[];cloudLoaded=false;if(user){pendingRedirectError=null;if(signInWatchdog){clearTimeout(signInWatchdog);signInWatchdog=null}signInInProgress=false;upsertFbProfile(user).then(function(){return loadCloudOrdersForUser()}).then(function(){syncPendingOrders();renderAuthArea();closeAll();if(afterAuth){afterAuthSuccess()}else{route()}})}else{renderAuthArea();if(['orders','account','checkout'].indexOf(currentRouteName)>=0)route()}})}catch(e){console.warn('Firebase init:',e);fbInitError='Firebase could not start. Please check your connection and refresh.';logAuthDiag('auth/init-failed',e&&e.message||fbInitError,'initFirebase');fbReady=true;renderAuthArea()}}
+function setGoogleBtnLoading(loading){var b=document.getElementById('fbGoogleBtn');if(!b)return;b.disabled=!!loading;var s=b.querySelector('span');if(s)s.textContent=loading?'Opening…':'Continue with Google';b.style.opacity=loading?'0.72':'';b.setAttribute('aria-busy',loading?'true':'false')}
+function initFirebase(){try{if(!window.firebase){fbInitError='Firebase library could not load (network). Sign-in is unavailable offline — please reconnect and refresh.';fbReady=true;renderAuthArea();return}if(!firebase.apps.length)firebase.initializeApp(firebaseConfig);fbAuth=firebase.auth();fbDb=firebase.firestore();
+ var pendingAtLoad=getRedirectPending();var pendingIsStale=pendingAtLoad?isRedirectPendingStale(pendingAtLoad):false;if(pendingAtLoad&&pendingIsStale){clearRedirectPending();pendingAtLoad=null}
+ var hadPending=!!pendingAtLoad;var redirectHadUser=false;var redirectHadError=false;
+ /* Process getRedirectResult FIRST, then onAuthStateChanged */
+ var redirectPromise;try{redirectPromise=fbAuth.getRedirectResult()}catch(ge){redirectPromise=Promise.reject(ge)}
+ Promise.resolve(redirectPromise).then(function(res){redirectResultSettled=true;if(res&&res.user){redirectHadUser=true;pendingRedirectError=null;clearRedirectPending()} }).catch(function(e){redirectResultSettled=true;redirectHadError=true;console.warn('Redirect result:',e);clearRedirectPending();if(!e)return;var code=e.code||'auth/redirect-error';var friendly=friendlyAuthError(code,e.message);pendingRedirectError={code:code,message:e.message||friendly,at:new Date().toISOString()};logAuthDiag(code,e.message||friendly,'getRedirectResult');try{openAuth();setAuthStatus('Google sign-in did not complete after returning to this page. '+friendly,true);renderAuthDiag()}catch(err2){}}).then(function(){
+   fbAuth.onAuthStateChanged(function(user){fbUser=user||null;fbReady=true;fbProfile=null;cloudOrders=[];cloudLoaded=false;redirectAuthChecked=true;
+     if(user){var wasRedirectPending=hadPending||redirectHadUser;pendingRedirectError=null;clearRedirectPending();signInInProgress=false;
+       upsertFbProfile(user).then(function(){return loadCloudOrdersForUser()}).then(function(){syncPendingOrders();renderAuthArea();closeAll();if(wasRedirectPending){var nm=user.displayName||(user.email?user.email.split('@')[0]:'');toast(nm?('Signed in - welcome, '+nm):'Signed in - welcome')}if(afterAuth){afterAuthSuccess()}else{route()}});
+     }else{
+       renderAuthArea();
+       /* Flag set, no user, no redirect error, not stale -> did-not-complete */
+       if(hadPending&&!redirectHadUser&&!redirectHadError&&!pendingRedirectError){hadPending=false;clearRedirectPending();var nc='auth/redirect-no-user';var nf=friendlyAuthError(nc,'Redirect returned without a user');pendingRedirectError={code:nc,message:nf,at:new Date().toISOString()};logAuthDiag(nc,'Redirect flag was set but no user arrived after load','redirect-no-user');try{openAuth();setAuthStatus('Sign-in did not complete - please try again',true);renderAuthDiag()}catch(err3){}}
+       if(['orders','account','checkout'].indexOf(currentRouteName)>=0)route();
+     }});
+ });
+ }catch(e){console.warn('Firebase init:',e);fbInitError='Firebase could not start. Please check your connection and refresh.';logAuthDiag('auth/init-failed',e&&e.message||fbInitError,'initFirebase');fbReady=true;renderAuthArea()}}
 function signInWithGoogle(){
  if(signInInProgress)return;
- if(!fbAuth){var m0=fbInitError||'Sign-in is loading — please wait a second and tap again.';setAuthStatus(m0,true);logAuthDiag('auth/not-initialized',m0,'signInWithGoogle');initFirebase();return}
- signInInProgress=true;setGoogleBtnLoading(true);setAuthStatus('Opening Google sign-in…');
+ if(!fbAuth){var m0=fbInitError||'Sign-in is loading — please wait a second and tap again.';setAuthStatus(m0,true);logAuthDiag('auth/not-initialized',m0,'signInWithGoogle');return}
+ signInInProgress=true;setGoogleBtnLoading(true);setAuthStatus('Taking you to Google sign-in…');
+ /* Keep dialog open — do NOT close it here. Page will navigate away to Google. */
+ setRedirectPending();
  var provider=new firebase.auth.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});
- var settled=false;
- function clearWatchdog(){if(signInWatchdog){clearTimeout(signInWatchdog);signInWatchdog=null}}
- signInWatchdog=setTimeout(function(){
-   if(settled)return;
-   if(fbUser){settled=true;signInInProgress=false;setGoogleBtnLoading(false);return}
-   settled=true;signInWatchdog=null;
-   logAuthDiag('auth/popup-timeout','Popup promise did not resolve/reject within 8 seconds and no auth state change — treated as blocked','watchdog');
-   doRedirectFallback(provider,'Popup was blocked — taking you to Google sign-in…','signInWithRedirect-watchdog');
- },8000);
- var popupPromise;
- try{popupPromise=fbAuth.signInWithPopup(provider)}catch(syncErr){clearWatchdog();settled=true;signInInProgress=false;setGoogleBtnLoading(false);var sc=syncErr&&syncErr.code||'auth/popup-sync-error';var sf=friendlyAuthError(sc,syncErr&&syncErr.message);logAuthDiag(sc,syncErr&&syncErr.message||sf,'signInWithPopup-sync');setAuthStatus(sf,true);return}
- if(!popupPromise||typeof popupPromise.then!=='function'){clearWatchdog();settled=true;signInInProgress=false;setGoogleBtnLoading(false);logAuthDiag('auth/popup-no-promise','signInWithPopup did not return a promise','signInWithPopup');setAuthStatus('Sign-in could not start in this browser. Please try again, or allow popups for this site.',true);return}
- popupPromise.then(function(){
-   if(settled)return;
-   settled=true;clearWatchdog();signInInProgress=false;setGoogleBtnLoading(false);setAuthStatus('Signed in with Google ✓');closeAll();toast('Signed in with Google');
- }).catch(function(e){
-   if(settled)return;
-   settled=true;clearWatchdog();console.warn('Popup sign-in:',e);
-   var code=e&&e.code||'';var rawMsg=e&&e.message||'';
-   if(code==='auth/popup-blocked'||code==='auth/cancelled-popup-request'){
-     logAuthDiag(code,rawMsg,'signInWithPopup');
-     doRedirectFallback(provider,'Popup was blocked — taking you to Google sign-in…','signInWithRedirect-'+code);
-     return;
-   }
-   if(code==='auth/operation-not-supported-in-this-environment'){
-     logAuthDiag(code,rawMsg,'signInWithPopup');
-     doRedirectFallback(provider,'Popup not supported here — taking you to Google sign-in…','signInWithRedirect-not-supported');
-     return;
-   }
-   signInInProgress=false;setGoogleBtnLoading(false);
-   var friendly=friendlyAuthError(code,rawMsg);
-   logAuthDiag(code||'unknown',rawMsg||friendly,'signInWithPopup');
-   setAuthStatus(friendly,true);
- });
+ try{
+   var rp=fbAuth.signInWithRedirect(provider);
+   if(rp&&typeof rp.catch==='function'){rp.catch(function(e){signInInProgress=false;setGoogleBtnLoading(false);clearRedirectPending();var code=(e&&e.code)||'auth/redirect-failed';var friendly=friendlyAuthError(code,e&&e.message);logAuthDiag(code,(e&&e.message)||friendly,'signInWithRedirect');setAuthStatus(friendly,true)})}
+ }catch(syncErr){signInInProgress=false;setGoogleBtnLoading(false);clearRedirectPending();var sc=(syncErr&&syncErr.code)||'auth/redirect-failed';var sf=friendlyAuthError(sc,syncErr&&syncErr.message);logAuthDiag(sc,(syncErr&&syncErr.message)||sf,'signInWithRedirect-sync');setAuthStatus(sf,true)}
 }
 
 /* ---------- storefront ---------- */
@@ -686,7 +674,7 @@ function renderCart(){
  updateCartUI();
 }
 function openCart(){renderCart();document.getElementById('cartDrawer').classList.add('show');document.getElementById('scrim').classList.add('show')}
-function closeAll(){var am=document.getElementById('authModal');var wasAuthOpen=am&&am.classList.contains('show');document.getElementById('cartDrawer').classList.remove('show');document.getElementById('scrim').classList.remove('show');if(am)am.classList.remove('show');var cm=document.getElementById('confirmModal');if(cm)cm.classList.remove('show');if(wasAuthOpen&&typeof signInInProgress!=='undefined'&&signInInProgress){if(typeof signInWatchdog!=='undefined'&&signInWatchdog){clearTimeout(signInWatchdog);signInWatchdog=null}signInInProgress=false;if(typeof setGoogleBtnLoading==='function')setGoogleBtnLoading(false)}}
+function closeAll(){document.getElementById('cartDrawer').classList.remove('show');document.getElementById('scrim').classList.remove('show');var am=document.getElementById('authModal');if(am)am.classList.remove('show');var cm=document.getElementById('confirmModal');if(cm)cm.classList.remove('show')}
 var PAGE_IDS=['pageHome','pageShop','pageCategory','pageCategories','pageProduct','pageCart','pageOrders','pageOrderDetail','pageSupport','pagePolicies','checkoutView','accountView','adminView'];
 function showView(id){PAGE_IDS.forEach(function(v){var el=document.getElementById(v);if(el)el.classList.toggle('show',v===id)});var pm=document.getElementById('pageMain');if(pm)pm.style.display=(id==='checkoutView'||id==='accountView'||id==='adminView')?'none':'';window.scrollTo(0,0)}
 function navTo(p){var target='#'+p;if(location.hash===target){route()}else location.hash=target}
@@ -827,7 +815,7 @@ function googleMsgShow(m){if(typeof setAuthStatus==='function'){setAuthStatus(m,
 function renderGoogleArea(){
  var el=document.getElementById('googleArea');if(!el)return;
  if(el.dataset.rendered==='firebase'){if(typeof renderAuthDiag==='function')renderAuthDiag();return}el.dataset.rendered='firebase';
- el.innerHTML='<button type="button" id="fbGoogleBtn" class="btn" style="width:100%;justify-content:center;font-size:1rem;padding:13px 16px;background:#fff;color:#1f1f1f;border:1px solid #dadce0;min-height:52px" onclick="signInWithGoogle()"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M22.6 12.3c0-.8-.1-1.5-.2-2.3H12v4.5h5.9a5 5 0 0 1-2.2 3.3v2.7h3.6c2.1-1.9 3.3-4.8 3.3-8.5z"/><path fill="#34A853" d="M12 23c3 0 5.5-1 7.3-2.7l-3.6-2.7c-1 .7-2.3 1.1-3.7 1.1-2.9 0-5.3-1.9-6.2-4.6H2.1v2.9A11 11 0 0 0 12 23z"/><path fill="#FBBC05" d="M5.8 14.1A6.6 6.6 0 0 1 5.5 12c0-.7.1-1.4.3-2.1V7H2.1a11 11 0 0 0 0 10l3.7-2.9z"/><path fill="#EA4335" d="M12 5.3c1.6 0 3.1.6 4.3 1.6l3.2-3.2A11 11 0 0 0 2.1 7l3.7 2.9C6.7 7.2 9.1 5.3 12 5.3z"/></svg><span>Continue with Google</span></button><p class="small" style="text-align:center;margin-top:8px">Secure sign-in by Firebase · Opens in a popup — if the popup is blocked or does not respond in a few seconds, you will be taken to Google sign-in in the full page automatically.</p>';
+ el.innerHTML='<button type="button" id="fbGoogleBtn" class="btn" style="width:100%;justify-content:center;font-size:1rem;padding:13px 16px;background:#fff;color:#1f1f1f;border:1px solid #dadce0;min-height:52px" onclick="signInWithGoogle()"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M22.6 12.3c0-.8-.1-1.5-.2-2.3H12v4.5h5.9a5 5 0 0 1-2.2 3.3v2.7h3.6c2.1-1.9 3.3-4.8 3.3-8.5z"/><path fill="#34A853" d="M12 23c3 0 5.5-1 7.3-2.7l-3.6-2.7c-1 .7-2.3 1.1-3.7 1.1-2.9 0-5.3-1.9-6.2-4.6H2.1v2.9A11 11 0 0 0 12 23z"/><path fill="#FBBC05" d="M5.8 14.1A6.6 6.6 0 0 1 5.5 12c0-.7.1-1.4.3-2.1V7H2.1a11 11 0 0 0 0 10l3.7-2.9z"/><path fill="#EA4335" d="M12 5.3c1.6 0 3.1.6 4.3 1.6l3.2-3.2A11 11 0 0 0 2.1 7l3.7 2.9C6.7 7.2 9.1 5.3 12 5.3z"/></svg><span>Continue with Google</span></button><p class="small" style="text-align:center;margin-top:8px">Secure sign-in by Firebase · You will be taken to Google sign-in in the full page and returned here automatically.</p>';
  if(typeof renderAuthDiag==='function')renderAuthDiag();
 }
 
@@ -993,7 +981,7 @@ function renderSettings(){
  +'<div class="field full"><label>Announcement bar text</label><input id="sf_ann" value="'+esc(settings.announcement||'')+'"/></div>'
  +'<div class="field full"><label>Your UPI ID (for UPI Prepaid at checkout)</label><input id="sf_upi" placeholder="e.g. yourname@okhdfcbank — leave blank until you add one" value="'+esc(settings.upiId||'')+'"/></div>'
  +'<div class="field full"><label>Order notification email (for the “Email my order” backup button)</label><input id="sf_email" type="email" value="'+esc(settings.notifyEmail||'smartphone786687@gmail.com')+'"/></div></div>'
- +'<h3>Google Sign-In — Firebase</h3><div class="notice" style="margin-top:10px;line-height:1.65"><b>Firebase Authentication is active</b> — project <code>festive-jewels</code>, Google provider enabled, authorised domain <code>smartphone786687-spec.github.io</code>. Customers sign in with the stable “Continue with Google” button (Firebase popup with 8-second watchdog — if the popup is blocked or hangs, it automatically falls back to full-page redirect sign-in). Profiles and orders are stored in <b>Firestore</b>. No Client ID to paste here anymore — the old GIS widget has been removed. Products &amp; settings on this page are <b>not</b> cloud-synced; they stay in this browser.</div>'
+ +'<h3>Google Sign-In — Firebase</h3><div class="notice" style="margin-top:10px;line-height:1.65"><b>Firebase Authentication is active</b> — project <code>festive-jewels</code>, Google provider enabled, authorised domain <code>smartphone786687-spec.github.io</code>. Customers sign in with the stable “Continue with Google” button using full-page redirect sign-in (Firebase signInWithRedirect) — no popup, works in Facebook/WhatsApp in-app browsers. Profiles and orders are stored in <b>Firestore</b>. No Client ID to paste here anymore — the old GIS widget has been removed. Products &amp; settings on this page are <b>not</b> cloud-synced; they stay in this browser.</div>'
  +'<div class="notice" style="margin-top:10px;line-height:1.65"><div id="adminAuthDiag"><b>Sign-in diagnostics:</b> Loading…</div><button type="button" class="btn" style="margin-top:8px;padding:6px 12px" onclick="try{localStorage.removeItem(\'fjgh_authdiag\')}catch(e){};renderAuthDiag();toast(\'Diagnostics cleared\')">Clear diagnostics</button></div>'
  +'<h3 style="margin-top:18px">Payments</h3><div class="notice" style="line-height:1.65"><b>Working today:</b> COD and UPI Prepaid (above).<br/><b>Razorpay-ready note:</b> live card/UPI gateway payments need your own Razorpay account (KYC + bank) <i>and</i> a small backend server to hold the secret key — a secret key must never sit in a public GitHub Pages page. When you are ready, add a backend (e.g. your Render service) and plug Razorpay Checkout in there; do not paste secret keys into this page.</div>'
  +'<h3 style="margin-top:18px">Order notifications — status</h3><div class="notice" style="line-height:1.75">'
